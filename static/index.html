@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neo4j Query Interface</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #4D9BD6;
+            --secondary-color: #276D9E;
+            --background-color: #f5f8fa;
+            --card-color: white;
+            --text-color: #333;
+            --border-color: #ddd;
+            --success-color: #28a745;
+            --warning-color: #ffc107;
+            --error-color: #dc3545;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--primary-color);
+            margin-right: 20px;
+        }
+
+        .logo i {
+            margin-right: 10px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            font-size: 14px;
+            padding: 6px 12px;
+            border-radius: 15px;
+            background-color: var(--warning-color);
+        }
+
+        .status-indicator.connected {
+            background-color: var(--success-color);
+            color: white;
+        }
+
+        .status-indicator i {
+            margin-right: 5px;
+        }
+
+        .card {
+            background-color: var(--card-color);
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 18px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .search-form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .search-input {
+            display: flex;
+            position: relative;
+        }
+
+        input[type="text"], select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(77, 155, 214, 0.2);
+        }
+
+        .search-button {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--primary-color);
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        .options-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .option-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .option-label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            margin-top: 5px;
+        }
+
+        .checkbox-group input {
+            margin-right: 8px;
+        }
+
+        .button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .button:hover {
+            background-color: var(--secondary-color);
+        }
+
+        .button:disabled {
+            background-color: #aaa;
+            cursor: not-allowed;
+        }
+
+        .results {
+            margin-top: 10px;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+
+        .count-badge {
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 12px;
+            padding: 3px 10px;
+            font-size: 14px;
+        }
+
+        .cypher-query {
+            background-color: #f1f1f1;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            overflow-x: auto;
+        }
+
+        .result-item {
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background-color: var(--card-color);
+        }
+
+        .result-content {
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+
+        .result-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            font-size: 14px;
+        }
+
+        .meta-group {
+            display: flex;
+            align-items: center;
+        }
+
+        .meta-label {
+            font-weight: 600;
+            margin-right: 5px;
+            color: #666;
+        }
+
+        .tag {
+            background-color: #e9f5ff;
+            color: var(--primary-color);
+            border-radius: 20px;
+            padding: 3px 10px;
+            margin-right: 5px;
+            font-size: 12px;
+            display: inline-block;
+            margin-bottom: 5px;
+        }
+
+        .score-pill {
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 20px;
+            padding: 2px 8px;
+            font-size: 12px;
+        }
+
+        .loader {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loader i {
+            font-size: 30px;
+            color: var(--primary-color);
+            animation: spin 1s infinite linear;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 12px 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .options-row {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo"><i class="fas fa-project-diagram"></i> Neo4j Query UI</div>
+            <div class="status-indicator" id="statusIndicator">
+                <i class="fas fa-circle-notch fa-spin"></i>
+                <span>Checking connection...</span>
+            </div>
+        </header>
+
+        <div class="card">
+            <div class="card-title">
+                <span>Search Knowledge Graph</span>
+            </div>
+            <div class="search-form">
+                <div class="search-input">
+                    <input type="text" id="queryInput" placeholder="Enter your question in natural language...">
+                    <button type="button" class="search-button" id="clearButton" title="Clear">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <div class="options-row">
+                    <div class="option-group">
+                        <label class="option-label">Search Type</label>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="vectorSearchCheckbox">
+                            <label for="vectorSearchCheckbox">Use vector search (semantic similarity)</label>
+                        </div>
+                    </div>
+                    
+                    <div class="option-group">
+                        <label class="option-label" for="topKInput">Results to return</label>
+                        <select id="topKInput">
+                            <option value="5">5 (Default)</option>
+                            <option value="10">10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                        </select>
+                    </div>
+                    
+                    <div class="option-group entity-filter" style="display: none;">
+                        <label class="option-label" for="entityFilterInput">Filter by Entity (optional)</label>
+                        <input type="text" id="entityFilterInput" placeholder="Entity name...">
+                    </div>
+                </div>
+                
+                <div>
+                    <button type="button" class="button" id="searchButton">
+                        <i class="fas fa-search"></i> Search
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="error-message" id="errorMessage"></div>
+        
+        <div class="loader" id="loader">
+            <i class="fas fa-circle-notch fa-spin"></i>
+            <p>Processing your query...</p>
+        </div>
+
+        <div class="results" id="resultsContainer" style="display: none;">
+            <div class="card">
+                <div class="results-header">
+                    <span>Results</span>
+                    <span class="count-badge" id="resultCount">0</span>
+                </div>
+                
+                <div class="cypher-query" id="cypherQuery"></div>
+                
+                <div id="resultsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Elements
+            const statusIndicator = document.getElementById('statusIndicator');
+            const queryInput = document.getElementById('queryInput');
+            const clearButton = document.getElementById('clearButton');
+            const vectorSearchCheckbox = document.getElementById('vectorSearchCheckbox');
+            const topKInput = document.getElementById('topKInput');
+            const entityFilterInput = document.getElementById('entityFilterInput');
+            const searchButton = document.getElementById('searchButton');
+            const errorMessage = document.getElementById('errorMessage');
+            const loader = document.getElementById('loader');
+            const resultsContainer = document.getElementById('resultsContainer');
+            const resultCount = document.getElementById('resultCount');
+            const cypherQuery = document.getElementById('cypherQuery');
+            const resultsList = document.getElementById('resultsList');
+            
+            // Check connection status
+            checkHealth();
+            
+            // Show/hide entity filter when vector search is toggled
+            vectorSearchCheckbox.addEventListener('change', function() {
+                const entityFilterGroup = document.querySelector('.entity-filter');
+                entityFilterGroup.style.display = this.checked ? 'block' : 'none';
+            });
+            
+            // Clear search input
+            clearButton.addEventListener('click', function() {
+                queryInput.value = '';
+                queryInput.focus();
+            });
+            
+            // Search function
+            searchButton.addEventListener('click', executeSearch);
+            queryInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    executeSearch();
+                }
+            });
+            
+            // Functions
+            function checkHealth() {
+                fetch('/health')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'healthy') {
+                            statusIndicator.innerHTML = '<i class="fas fa-check-circle"></i> Connected to Neo4j';
+                            statusIndicator.classList.add('connected');
+                        } else {
+                            statusIndicator.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + (data.details.error || 'Initializing...');
+                        }
+                    })
+                    .catch(error => {
+                        statusIndicator.innerHTML = '<i class="fas fa-times-circle"></i> Connection Error';
+                        console.error('Health check error:', error);
+                    });
+            }
+            
+            function executeSearch() {
+                const query = queryInput.value.trim();
+                if (!query) {
+                    showError('Please enter a search query');
+                    return;
+                }
+                
+                // Clear previous results and errors
+                hideError();
+                showLoader();
+                resultsContainer.style.display = 'none';
+                
+                // Build query parameters
+                const params = {
+                    query: query,
+                    vector_search: vectorSearchCheckbox.checked,
+                    top_k: parseInt(topKInput.value)
+                };
+                
+                // Add entity filter if provided and vector search is enabled
+                if (vectorSearchCheckbox.checked && entityFilterInput.value.trim()) {
+                    params.entity_filter = entityFilterInput.value.trim();
+                }
+                
+                // Execute search
+                fetch('/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(params)
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(data => {
+                            throw new Error(data.error || 'Error executing query');
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    hideLoader();
+                    displayResults(data);
+                })
+                .catch(error => {
+                    hideLoader();
+                    showError(error.message);
+                    console.error('Search error:', error);
+                });
+            }
+            
+            function displayResults(data) {
+                resultsContainer.style.display = 'block';
+                resultCount.textContent = data.count;
+                cypherQuery.textContent = data.cypher || 'No Cypher query generated';
+                resultsList.innerHTML = '';
+                
+                if (data.results && data.results.length > 0) {
+                    data.results.forEach((result, index) => {
+                        const resultItem = document.createElement('div');
+                        resultItem.className = 'result-item';
+                        
+                        let resultHtml = '';
+                        
+                        // Article content (always present)
+                        if (result.article) {
+                            // Limit article content to a reasonable length for display
+                            const maxLength = 500;
+                            let articleContent = result.article;
+                            if (articleContent.length > maxLength) {
+                                articleContent = articleContent.substring(0, maxLength) + '...';
+                            }
+                            
+                            resultHtml += `<div class="result-content">${articleContent}</div>`;
+                        }
+                        
+                        // Result metadata
+                        resultHtml += '<div class="result-meta">';
+                        
+                        // Score (for vector search)
+                        if (result.score !== undefined) {
+                            const scorePercent = Math.round(result.score * 100);
+                            resultHtml += `
+                                <div class="meta-group">
+                                    <span class="meta-label">Relevance:</span>
+                                    <span class="score-pill">${scorePercent}%</span>
+                                </div>
+                            `;
+                        }
+                        
+                        // Topics
+                        if (result.topics && result.topics.length) {
+                            resultHtml += `
+                                <div class="meta-group">
+                                    <span class="meta-label">Topics:</span>
+                                    <div>
+                            `;
+                            
+                            result.topics.forEach(topic => {
+                                if (topic) {
+                                    resultHtml += `<span class="tag">${topic}</span>`;
+                                }
+                            });
+                            
+                            resultHtml += `
+                                    </div>
+                                </div>
+                            `;
+                        }
+                        
+                        // Entities
+                        if (result.entities && result.entities.length) {
+                            resultHtml += `
+                                <div class="meta-group">
+                                    <span class="meta-label">Entities:</span>
+                                    <div>
+                            `;
+                            
+                            result.entities.forEach(entity => {
+                                if (entity) {
+                                    resultHtml += `<span class="tag">${entity}</span>`;
+                                }
+                            });
+                            
+                            resultHtml += `
+                                    </div>
+                                </div>
+                            `;
+                        }
+                        
+                        // Authors
+                        if (result.authors && result.authors.length) {
+                            resultHtml += `
+                                <div class="meta-group">
+                                    <span class="meta-label">Authors:</span>
+                                    <div>
+                            `;
+                            
+                            result.authors.forEach(author => {
+                                if (author) {
+                                    resultHtml += `<span class="tag">${author}</span>`;
+                                }
+                            });
+                            
+                            resultHtml += `
+                                    </div>
+                                </div>
+                            `;
+                        }
+                        
+                        // People mentioned
+                        if (result.mentioned_people && result.mentioned_people.length) {
+                            resultHtml += `
+                                <div class="meta-group">
+                                    <span class="meta-label">People:</span>
+                                    <div>
+                            `;
+                            
+                            result.mentioned_people.forEach(person => {
+                                if (person) {
+                                    resultHtml += `<span class="tag">${person}</span>`;
+                                }
+                            });
+                            
+                            resultHtml += `
+                                    </div>
+                                </div>
+                            `;
+                        }
+                        
+                        resultHtml += '</div>'; // Close meta
+                        resultItem.innerHTML = resultHtml;
+                        resultsList.appendChild(resultItem);
+                    });
+                } else {
+                    resultsList.innerHTML = '<p>No results found</p>';
+                }
+            }
+            
+            function showLoader() {
+                loader.style.display = 'block';
+                searchButton.disabled = true;
+            }
+            
+            function hideLoader() {
+                loader.style.display = 'none';
+                searchButton.disabled = false;
+            }
+            
+            function showError(message) {
+                errorMessage.textContent = message;
+                errorMessage.style.display = 'block';
+            }
+            
+            function hideError() {
+                errorMessage.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
