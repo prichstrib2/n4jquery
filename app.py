@@ -5,9 +5,6 @@ import requests
 import json
 from typing import Dict, List, Any, Tuple, Optional
 
-# Import the classes from your original script
-# You can also separate these into different modules if needed
-
 class Neo4jConnection:
     def __init__(self, uri, user, password, database=None):
         self.uri = uri
@@ -59,14 +56,24 @@ class EmbeddingGenerator:
     """Class to generate embeddings for text using the intfloat/e5-base-v2 model."""
     
     def __init__(self, model_name="intfloat/e5-base-v2"):
-        """Initialize with the model name."""
+        """Initialize with the model name but DON'T load the model yet."""
         self.model_name = model_name
         self.model = None
         self.tokenizer = None
-        self._load_model()
+        self.is_loading = False
+        print(f"✅ EmbeddingGenerator initialized (model will be loaded on first use)")
     
     def _load_model(self):
         """Load the embedding model and tokenizer."""
+        if self.model is not None and self.tokenizer is not None:
+            # Model already loaded
+            return True
+            
+        if self.is_loading:
+            print("Model is already being loaded...")
+            return False
+            
+        self.is_loading = True
         try:
             from transformers import AutoModel, AutoTokenizer
             import torch
@@ -86,17 +93,22 @@ class EmbeddingGenerator:
                 print("Using CPU for embeddings")
                 
             print("✅ Embedding model loaded successfully")
+            self.is_loading = False
+            return True
         except Exception as e:
             print(f"❌ Error loading embedding model: {e}")
             print("Make sure you have installed the required packages:")
             print("pip install transformers torch")
+            self.is_loading = False
+            return False
     
     def generate_embedding(self, text: str) -> List[float]:
         """Generate an embedding vector for the given text using e5-base-v2."""
+        # Try to load the model if not already loaded
         if self.model is None or self.tokenizer is None:
-            print("Model not loaded. Trying to load...")
-            self._load_model()
-            if self.model is None or self.tokenizer is None:
+            print("Model not loaded. Loading now...")
+            success = self._load_model()
+            if not success or self.model is None or self.tokenizer is None:
                 print("Failed to load model.")
                 return []
         
@@ -402,6 +414,7 @@ class NLQueryInterface:
         """Initialize with connection details."""
         self.neo4j = Neo4jConnection(uri, user, password)
         self.generator = LLMCypherGenerator(api_key)
+        # Initialize but don't load the model
         self.embedding_generator = EmbeddingGenerator(embedding_model)
     
     def query(self, text, use_vector_search=False, top_k=5):
@@ -446,6 +459,7 @@ class VectorSearchInterface:
     def __init__(self, uri, user, password, api_key=None, embedding_model="intfloat/e5-base-v2"):
         """Initialize with connection details."""
         self.neo4j = Neo4jConnection(uri, user, password)
+        # Initialize but don't load the model
         self.embedding_generator = EmbeddingGenerator(embedding_model)
         self.index_name = "article_content_index"  # The actual vector index name
     
@@ -524,26 +538,36 @@ class VectorSearchInterface:
 # Initialize Flask app
 app = Flask(__name__)
 
-# Create query interface instance
+# Global variables to track initialization state
 interface = None
+initialization_status = {
+    "db_initialized": False,
+    "error": None
+}
 
 @app.before_first_request
 def initialize_interface():
-    global interface
+    global interface, initialization_status
     
-    # Get environment variables for connection
-    neo4j_uri = os.environ.get("NEO4J_URI")
-    neo4j_user = os.environ.get("NEO4J_USER")
-    neo4j_password = os.environ.get("NEO4J_PASSWORD")
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    # If interface is already initialized, don't do it again
+    if interface is not None:
+        return
     
-    # Check if essential environment variables are present
-    if not all([neo4j_uri, neo4j_user, neo4j_password]):
-        print("❌ Error: Missing required environment variables for Neo4j connection")
-        # App will still start but queries will fail
-    
-    # Initialize interface
     try:
+        # Get environment variables for connection
+        neo4j_uri = os.environ.get("NEO4J_URI")
+        neo4j_user = os.environ.get("NEO4J_USER")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        
+        # Check if essential environment variables are present
+        if not all([neo4j_uri, neo4j_user, neo4j_password]):
+            error_msg = "Missing required environment variables for Neo4j connection"
+            print(f"❌ Error: {error_msg}")
+            initialization_status["error"] = error_msg
+            return
+        
+        # Initialize interface
         interface = NLQueryInterface(
             uri=neo4j_uri,
             user=neo4j_user,
@@ -551,9 +575,14 @@ def initialize_interface():
             api_key=openai_api_key,
             embedding_model="intfloat/e5-base-v2"
         )
-        print("✅ Query interface initialized successfully")
+        
+        initialization_status["db_initialized"] = True
+        print("✅ Query interface initialized successfully (without loading the embedding model)")
     except Exception as e:
-        print(f"❌ Error initializing query interface: {e}")
+        error_msg = f"Error initializing query interface: {e}"
+        print(f"❌ {error_msg}")
+        initialization_status["error"] = error_msg
+
 
 @app.route('/query', methods=['GET', 'POST'])
 def query_endpoint():
@@ -569,7 +598,7 @@ def query_endpoint():
     Returns:
         JSON response with results and query information
     """
-    global interface
+    global interface, initialization_status
     
     # Initialize interface if not already done
     if interface is None:
@@ -577,7 +606,8 @@ def query_endpoint():
             initialize_interface()
         except Exception as e:
             return jsonify({
-                "error": f"Failed to initialize query interface: {str(e)}"
+                "error": f"Failed to initialize query interface: {str(e)}",
+                "status": initialization_status
             }), 500
     
     # Get parameters (from either GET or POST)
@@ -641,10 +671,33 @@ def query_endpoint():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Simple health check endpoint."""
+    """Health check endpoint with initialization status."""
+    global interface, initialization_status
+    
+    # Initialize interface if not already done
+    if interface is None:
+        try:
+            initialize_interface()
+        except Exception as e:
+            pass  # We'll report the error in the status
+    
+    return jsonify({
+        "status": "healthy" if initialization_status["db_initialized"] else "initializing",
+        "message": "Neo4j Query API is running",
+        "details": initialization_status
+    })
+
+@app.route('/', methods=['GET'])
+def home():
+    """Root endpoint showing app is running."""
     return jsonify({
         "status": "healthy",
-        "message": "Neo4j Query API is running"
+        "message": "n4jquery API is running",
+        "version": "1.0",
+        "endpoints": {
+            "/query": "Main query endpoint (GET/POST)",
+            "/health": "Health check endpoint"
+        }
     })
 
 # Error handlers
