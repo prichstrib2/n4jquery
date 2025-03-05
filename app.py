@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 import os
 from neo4j import GraphDatabase
 import requests
@@ -583,6 +583,10 @@ def initialize_interface():
         print(f"❌ {error_msg}")
         initialization_status["error"] = error_msg
 
+@app.route('/', methods=['GET'])
+def serve_ui():
+    return send_from_directory('static', 'index.html')
+
 
 @app.route('/query', methods=['GET', 'POST'])
 def query_endpoint():
@@ -687,9 +691,9 @@ def health_check():
         "details": initialization_status
     })
 
-@app.route('/', methods=['GET'])
-def home():
-    """Root endpoint showing app is running."""
+@app.route('/api', methods=['GET'])
+def api_info():
+    """API info endpoint showing app is running."""
     return jsonify({
         "status": "healthy",
         "message": "n4jquery API is running",
@@ -699,6 +703,7 @@ def home():
             "/health": "Health check endpoint"
         }
     })
+    
 
 # Error handlers
 @app.errorhandler(404)
