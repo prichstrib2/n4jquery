@@ -361,21 +361,36 @@ IMPORTANT NOTES:
         key_terms = self._extract_search_terms(query_text)
         content_filter = self._build_content_filter(key_terms)
         
+        # Check for name pattern in query (FirstName LastName) - likely a Person query
+        name_pattern = self._extract_name_pattern(query_text)
+        if name_pattern and "author" not in query_lower:
+            return f"""
+            MATCH (art:Article)
+            {content_filter}
+            OPTIONAL MATCH (art)-[:MENTIONS_PERSON]->(p:Person)
+            WHERE toLower(p.name) CONTAINS toLower('{name_pattern}')
+            OPTIONAL MATCH (art)-[:HAS_TOPIC]->(t:Topic)
+            RETURN art.content AS article, 
+                   collect(DISTINCT t.name) AS topics,
+                   collect(DISTINCT p.name) AS people
+            LIMIT {top_k}
+            """
+        
         # Check query intent based on keywords
-        if "topic" in query_lower and "article" in query_lower:
+        if "author" in query_lower and "article" in query_lower:
+            # Articles by author - note that authors use ID, not name
+            return f"""
+            MATCH (a:Author)-[:WROTE]->(art:Article)
+            {content_filter}
+            RETURN art.content AS article, a.id AS author
+            LIMIT {top_k}
+            """
+        elif "topic" in query_lower and "article" in query_lower:
             # Articles by topic
             return f"""
             MATCH (art:Article)-[:HAS_TOPIC]->(t:Topic)
             {content_filter}
             RETURN art.content AS article, collect(DISTINCT t.name) AS topics
-            LIMIT {top_k}
-            """
-        elif "author" in query_lower and "article" in query_lower:
-            # Articles by author
-            return f"""
-            MATCH (a:Author)-[:WROTE]->(art:Article)
-            {content_filter}
-            RETURN art.content AS article, a.id AS author
             LIMIT {top_k}
             """
         elif "entity" in query_lower and "article" in query_lower:
@@ -387,7 +402,7 @@ IMPORTANT NOTES:
             LIMIT {top_k}
             """
         elif "person" in query_lower and "article" in query_lower:
-            # Articles mentioning people
+            # Articles mentioning people (persons are separate from authors)
             return f"""
             MATCH (art:Article)-[:MENTIONS_PERSON]->(p:Person)
             {content_filter}
@@ -401,11 +416,11 @@ IMPORTANT NOTES:
             {content_filter}
             OPTIONAL MATCH (art)-[:HAS_TOPIC]->(t:Topic)
             OPTIONAL MATCH (a:Author)-[:WROTE]->(art)
-            OPTIONAL MATCH (art)-[:MENTIONS_ENTITY]->(e:Entity)
+            OPTIONAL MATCH (art)-[:MENTIONS_PERSON]->(p:Person)
             RETURN art.content AS article, 
                    collect(DISTINCT t.name) AS topics,
                    collect(DISTINCT a.id) AS authors,
-                   collect(DISTINCT e.name) AS entities
+                   collect(DISTINCT p.name) AS people
             LIMIT {top_k}
             """
         elif "topic" in query_lower:
@@ -417,10 +432,18 @@ IMPORTANT NOTES:
             LIMIT {top_k}
             """
         elif "author" in query_lower:
-            # Just return authors
+            # Just return authors (using ID)
             return f"""
             MATCH (a:Author)
             RETURN a.id AS author
+            LIMIT {top_k}
+            """
+        elif any(name in query_lower for name in ["person", "people"]):
+            # Just return people
+            return f"""
+            MATCH (p:Person)
+            WHERE toLower(p.name) CONTAINS toLower('{query_text}')
+            RETURN p.name AS person
             LIMIT {top_k}
             """
         else:
@@ -430,13 +453,36 @@ IMPORTANT NOTES:
             {content_filter}
             OPTIONAL MATCH (art)-[:HAS_TOPIC]->(t:Topic)
             OPTIONAL MATCH (a:Author)-[:WROTE]->(art)
-            OPTIONAL MATCH (art)-[:MENTIONS_ENTITY]->(e:Entity)
+            OPTIONAL MATCH (art)-[:MENTIONS_PERSON]->(p:Person)
             RETURN art.content AS article, 
                    collect(DISTINCT t.name) AS topics,
-                   collect(DISTINCT a.id) AS authors,
-                   collect(DISTINCT e.name) AS entities
+                   collect(DISTINCT a.id) AS authors, 
+                   collect(DISTINCT p.name) AS people
             LIMIT {top_k}
             """
+
+    def _extract_name_pattern(self, query_text: str) -> str:
+        """
+        Extract potential person name from query (e.g., "John Smith", "Senator Jones")
+        Returns the potential name or empty string if none found
+        """
+        # Look for capitalized words that might be names
+        words = query_text.split()
+        potential_name = []
+        
+        # Common titles that might precede a name
+        titles = ["senator", "governor", "mayor", "president", "representative", "rep", "sen", "gov", "congressman", "congresswoman"]
+        
+        for i, word in enumerate(words):
+            # Check for title followed by capitalized word
+            if i < len(words) - 1 and word.lower() in titles and words[i+1][0].isupper():
+                return " ".join(words[i:i+2])
+                
+            # Check for consecutive capitalized words (potential first/last name)
+            if word[0].isupper() and i < len(words) - 1 and words[i+1][0].isupper():
+                return " ".join(words[i:i+2])
+        
+        return ""
 
     def _extract_search_terms(self, query_text: str) -> list:
         """Extract key search terms from the query text."""
