@@ -143,6 +143,21 @@
             font-weight: 500;
         }
 
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .radio-option {
+            display: flex;
+            align-items: center;
+        }
+
+        .radio-option input {
+            margin-right: 8px;
+        }
+
         .checkbox-group {
             display: flex;
             align-items: center;
@@ -279,6 +294,19 @@
             display: none;
         }
 
+        .search-info {
+            background-color: #e9f5ff;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .search-info-title {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
         @media (max-width: 768px) {
             .options-row {
                 flex-direction: column;
@@ -310,10 +338,20 @@
                 
                 <div class="options-row">
                     <div class="option-group">
-                        <label class="option-label">Search Type</label>
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="vectorSearchCheckbox">
-                            <label for="vectorSearchCheckbox">Use vector search (semantic similarity)</label>
+                        <label class="option-label">Search Method</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="standardSearchRadio" name="searchType" value="standard" checked>
+                                <label for="standardSearchRadio">Standard Search (Graph Traversal)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="vectorSearchRadio" name="searchType" value="vector">
+                                <label for="vectorSearchRadio">Vector Search → Graph Enrichment</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="graphFirstVectorSearchRadio" name="searchType" value="graph_first_vector">
+                                <label for="graphFirstVectorSearchRadio">Graph Filter → Vector Search</label>
+                            </div>
                         </div>
                     </div>
                     
@@ -331,6 +369,11 @@
                         <label class="option-label" for="entityFilterInput">Filter by Entity (optional)</label>
                         <input type="text" id="entityFilterInput" placeholder="Entity name...">
                     </div>
+                </div>
+
+                <div class="search-info" id="searchInfo">
+                    <div class="search-info-title"><i class="fas fa-info-circle"></i> About this search method</div>
+                    <div id="searchInfoText"></div>
                 </div>
                 
                 <div>
@@ -368,10 +411,15 @@
             const statusIndicator = document.getElementById('statusIndicator');
             const queryInput = document.getElementById('queryInput');
             const clearButton = document.getElementById('clearButton');
-            const vectorSearchCheckbox = document.getElementById('vectorSearchCheckbox');
+            const standardSearchRadio = document.getElementById('standardSearchRadio');
+            const vectorSearchRadio = document.getElementById('vectorSearchRadio');
+            const graphFirstVectorSearchRadio = document.getElementById('graphFirstVectorSearchRadio');
             const topKInput = document.getElementById('topKInput');
             const entityFilterInput = document.getElementById('entityFilterInput');
+            const entityFilterGroup = document.querySelector('.entity-filter');
             const searchButton = document.getElementById('searchButton');
+            const searchInfo = document.getElementById('searchInfo');
+            const searchInfoText = document.getElementById('searchInfoText');
             const errorMessage = document.getElementById('errorMessage');
             const loader = document.getElementById('loader');
             const resultsContainer = document.getElementById('resultsContainer');
@@ -382,11 +430,14 @@
             // Check connection status
             checkHealth();
             
-            // Show/hide entity filter when vector search is toggled
-            vectorSearchCheckbox.addEventListener('change', function() {
-                const entityFilterGroup = document.querySelector('.entity-filter');
-                entityFilterGroup.style.display = this.checked ? 'block' : 'none';
+            // Show search method information
+            const searchTypeRadios = document.querySelectorAll('input[name="searchType"]');
+            searchTypeRadios.forEach(radio => {
+                radio.addEventListener('change', updateSearchInfo);
             });
+            
+            // Initial search info
+            updateSearchInfo();
             
             // Clear search input
             clearButton.addEventListener('click', function() {
@@ -403,6 +454,34 @@
             });
             
             // Functions
+            function updateSearchInfo() {
+                const selectedValue = document.querySelector('input[name="searchType"]:checked').value;
+                searchInfo.style.display = 'block';
+                
+                // Show/hide entity filter
+                entityFilterGroup.style.display = (selectedValue === 'vector') ? 'block' : 'none';
+                
+                if (selectedValue === 'standard') {
+                    searchInfoText.innerHTML = `
+                        Standard search uses graph traversal to find relevant articles. 
+                        This method examines relationships between nodes in the knowledge graph
+                        and is good for finding exact matches based on structure.
+                    `;
+                } else if (selectedValue === 'vector') {
+                    searchInfoText.innerHTML = `
+                        Vector search finds semantically similar content first, then adds graph context.
+                        This approach is good for finding conceptually related articles even when
+                        keywords don't match exactly. Results are ranked by semantic similarity.
+                    `;
+                } else if (selectedValue === 'graph_first_vector') {
+                    searchInfoText.innerHTML = `
+                        Graph Filter → Vector Search first identifies relevant articles using graph structure,
+                        then applies vector similarity search only to that filtered subset.
+                        This gives you both graph relevance and semantic similarity, and can be more efficient.
+                    `;
+                }
+            }
+            
             function checkHealth() {
                 fetch('/health')
                     .then(response => response.json())
@@ -432,15 +511,21 @@
                 showLoader();
                 resultsContainer.style.display = 'none';
                 
+                // Get search type
+                const searchType = document.querySelector('input[name="searchType"]:checked').value;
+                const vectorSearch = searchType === 'vector' || searchType === 'graph_first_vector';
+                const graphFilterFirst = searchType === 'graph_first_vector';
+                
                 // Build query parameters
                 const params = {
                     query: query,
-                    vector_search: vectorSearchCheckbox.checked,
+                    vector_search: vectorSearch,
+                    graph_filter_first: graphFilterFirst,
                     top_k: parseInt(topKInput.value)
                 };
                 
                 // Add entity filter if provided and vector search is enabled
-                if (vectorSearchCheckbox.checked && entityFilterInput.value.trim()) {
+                if (searchType === 'vector' && entityFilterInput.value.trim()) {
                     params.entity_filter = entityFilterInput.value.trim();
                 }
                 
