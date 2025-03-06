@@ -782,4 +782,265 @@ class VectorSearchInterface:
         
         return results
     
-    def _build_vector_search_query
+    def _build_vector_search_query(self, entity_filter: Optional[str], top_k: int) -> str:
+        """Build a Cypher query for vector search with optional filtering."""
+        # Base query - Article nodes only since only they have embeddings
+        base_query = f"""
+        CALL db.index.vector.queryNodes('{self.index_name}', $top_k, $embedding) 
+        YIELD node, score
+        """
+        
+        if entity_filter:
+            # Filter by specific entity - assuming node is an Article
+            filter_clause = """
+            WITH node, score
+            MATCH (node)-[:MENTIONS_ENTITY]->(e:Entity)
+            WHERE e.name = $entity_name
+            """
+            return f"{base_query} {filter_clause} RETURN node.content AS article, score ORDER BY score DESC"
+        else:
+            # No entity filter - return more information about the articles
+            return f"""
+            {base_query}
+            WITH node, score
+            OPTIONAL MATCH (node)-[:HAS_TOPIC]->(t:Topic)
+            OPTIONAL MATCH (a:Author)-[:WROTE]->(node)
+            RETURN node.content AS article, 
+                   collect(DISTINCT t.name) AS topics,
+                   collect(DISTINCT a.id) AS authors,
+                   score
+            ORDER BY score DESC
+            """
+    
+    def close(self):
+        """Close the Neo4j connection."""
+        self.neo4j.close()
+
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Global variables to track initialization state
+interface = None
+initialization_status = {
+    "db_initialized": False,
+    "error": None
+}
+
+@app.before_first_request
+def initialize_interface():
+    global interface, initialization_status
+    
+    # If interface is already initialized, don't do it again
+    if interface is not None:
+        return
+    
+    try:
+        # Get environment variables for connection
+        neo4j_uri = os.environ.get("NEO4J_URI")
+        neo4j_user = os.environ.get("NEO4J_USER")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        
+        # Check if essential environment variables are present
+        if not all([neo4j_uri, neo4j_user, neo4j_password]):
+            error_msg = "Missing required environment variables for Neo4j connection"
+            print(f"❌ Error: {error_msg}")
+            initialization_status["error"] = error_msg
+            return
+        
+        # Initialize interface
+        interface = NLQueryInterface(
+            uri=neo4j_uri,
+            user=neo4j_user,
+            password=neo4j_password,
+            api_key=openai_api_key,
+            embedding_model="intfloat/e5-base-v2"
+        )
+        
+        initialization_status["db_initialized"] = True
+        print("✅ Query interface initialized successfully (without loading the embedding model)")
+    except Exception as e:
+        error_msg = f"Error initializing query interface: {e}"
+        print(f"❌ {error_msg}")
+        initialization_status["error"] = error_msg
+
+@app.route('/', methods=['GET'])
+def serve_ui():
+    return send_from_directory('static', 'index.html')
+
+
+@app.route('/query', methods=['GET', 'POST'])
+def query_endpoint():
+    """
+    Enhanced query endpoint with better error handling and logging.
+    
+    Query parameters:
+    - query (required): Natural language query text
+    - vector_search (optional): Use vector search if "true" (default: false)
+    - top_k (optional): Number of top results to return (default: 5)
+    - entity_filter (optional): Entity name to filter results by (for vector search)
+    
+    Returns:
+        JSON response with results and query information
+    """
+    global interface, initialization_status
+    
+    # Initialize interface if not already done
+    if interface is None:
+        try:
+            initialize_interface()
+        except Exception as e:
+            return jsonify({
+                "error": f"Failed to initialize query interface: {str(e)}",
+                "status": initialization_status
+            }), 500
+    
+    # Check if database is initialized
+    if not initialization_status["db_initialized"]:
+        return jsonify({
+            "error": "Database connection not initialized",
+            "status": initialization_status
+        }), 503  # Service Unavailable
+    
+    # Get parameters (from either GET or POST)
+    try:
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            query_text = data.get('query', '')
+            vector_search = data.get('vector_search', False)
+            top_k = int(data.get('top_k', 5))
+            entity_filter = data.get('entity_filter')
+        else:  # GET
+            query_text = request.args.get('query', '')
+            vector_search = request.args.get('vector_search', 'false').lower() == 'true'
+            top_k = int(request.args.get('top_k', 5))
+            entity_filter = request.args.get('entity_filter')
+        
+        # Validate and sanitize input
+        if not query_text:
+            return jsonify({
+                "error": "Missing required parameter: query"
+            }), 400
+        
+        # Limit top_k to reasonable values
+        top_k = max(1, min(top_k, 100))  # Ensure between 1 and 100
+        
+        # Log the request
+        print(f"Query request: '{query_text}', vector_search={vector_search}, top_k={top_k}, entity_filter={entity_filter}")
+    except Exception as e:
+        return jsonify({
+            "error": f"Invalid request parameters: {str(e)}"
+        }), 400
+    
+    # Process the query based on the parameters
+    try:
+        # Import time module for tracking execution time
+        import time
+        
+        if vector_search and entity_filter:
+            # Use VectorSearchInterface for entity-filtered vector search
+            vector_interface = VectorSearchInterface(
+                uri=os.environ.get("NEO4J_URI"),
+                user=os.environ.get("NEO4J_USER"),
+                password=os.environ.get("NEO4J_PASSWORD"),
+                api_key=os.environ.get("OPENAI_API_KEY")
+            )
+            
+            start_time = time.time()
+            results = vector_interface.search(query_text, entity_filter, top_k)
+            cypher = vector_interface._build_vector_search_query(entity_filter, top_k)
+            vector_interface.close()
+            query_time = time.time() - start_time
+            
+            return jsonify({
+                "results": results,
+                "query": query_text,
+                "cypher": cypher,
+                "count": len(results),
+                "vector_search": True,
+                "entity_filter": entity_filter,
+                "execution_time_ms": round(query_time * 1000, 2)
+            })
+        else:
+            # Use the standard NLQueryInterface with timeout protection
+            start_time = time.time()
+            
+            # Set a timeout for the whole operation
+            results, cypher = interface.query(query_text, use_vector_search=vector_search, top_k=top_k)
+            query_time = time.time() - start_time
+            
+            # Clean up results to ensure they're serializable
+            sanitized_results = []
+            for result in results:
+                clean_result = {}
+                for k, v in result.items():
+                    if isinstance(v, (str, int, float, bool, list, dict)) or v is None:
+                        clean_result[k] = v
+                    else:
+                        # Convert non-serializable objects to strings
+                        clean_result[k] = str(v)
+                sanitized_results.append(clean_result)
+            
+            return jsonify({
+                "results": sanitized_results,
+                "query": query_text,
+                "cypher": cypher,
+                "count": len(results),
+                "vector_search": vector_search,
+                "execution_time_ms": round(query_time * 1000, 2)
+            })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"Query execution failed: {str(e)}",
+            "query": query_text,
+            "vector_search": vector_search
+        }), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint with initialization status."""
+    global interface, initialization_status
+    
+    # Initialize interface if not already done
+    if interface is None:
+        try:
+            initialize_interface()
+        except Exception as e:
+            pass  # We'll report the error in the status
+    
+    return jsonify({
+        "status": "healthy" if initialization_status["db_initialized"] else "initializing",
+        "message": "Neo4j Query API is running",
+        "details": initialization_status
+    })
+
+@app.route('/api', methods=['GET'])
+def api_info():
+    """API info endpoint showing app is running."""
+    return jsonify({
+        "status": "healthy",
+        "message": "n4jquery API is running",
+        "version": "1.0",
+        "endpoints": {
+            "/query": "Main query endpoint (GET/POST)",
+            "/health": "Health check endpoint"
+        }
+    })
+    
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({"error": "Internal server error"}), 500
+
+if __name__ == "__main__":
+    # For local development
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
