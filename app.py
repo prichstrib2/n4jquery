@@ -506,21 +506,37 @@ IMPORTANT NOTES:
         return where_clause
     
     def _create_prompt(self, query_text: str, vector_search: bool, top_k: int) -> str:
-        """
-        Create a prompt for the LLM to generate a Cypher query.
+    """
+    Create a prompt for the LLM to generate a Cypher query with clearer relationship instructions.
+    
+    Args:
+        query_text: Natural language query text
+        vector_search: Whether to use vector search
+        top_k: Number of top results to return for vector search
         
-        Args:
-            query_text: Natural language query text
-            vector_search: Whether to use vector search
-            top_k: Number of top results to return for vector search
-            
-        Returns:
-            Prompt for the LLM
-        """
-        base_prompt = f"""You are an expert in converting natural language queries into Neo4j Cypher queries.
+    Returns:
+        Prompt for the LLM
+    """
+    base_prompt = f"""You are an expert in converting natural language queries into Neo4j Cypher queries.
 Your task is to generate a valid Cypher query for Neo4j based on the user's question and the provided database schema.
 
 {self.schema_description}
+
+VERY IMPORTANT RELATIONSHIP CLARIFICATIONS:
+1. Authors WRITE Articles (using the :WROTE relationship)
+   - Example: (a:Author)-[:WROTE]->(art:Article)
+   - Authors are identified by their 'id' property
+
+2. Articles MENTION Persons (using the :MENTIONS_PERSON relationship)
+   - Example: (art:Article)-[:MENTIONS_PERSON]->(p:Person)
+   - Persons are identified by their 'name' property
+   - Persons do NOT write articles in this schema - only Authors do
+
+3. Articles MENTION Entities (using the :MENTIONS_ENTITY relationship)
+   - Example: (art:Article)-[:MENTIONS_ENTITY]->(e:Entity)
+
+4. Articles HAVE Topics (using the :HAS_TOPIC relationship)
+   - Example: (art:Article)-[:HAS_TOPIC]->(t:Topic)
 
 User's natural language query: "{query_text}"
 
@@ -532,18 +548,19 @@ IMPORTANT RULES:
 5. Only return properties that exist in the database schema
 6. Provide a clean, executable Cypher query with no explanations or comments
 7. If you're not sure about a property, use the safer OPTIONAL MATCH
-8. If finding articles, include their content using node.content AS article"""
+8. If finding articles, include their content using node.content AS article
+9. Never create a query where a Person node has a :WROTE relationship - only Author nodes can write articles"""
 
-        if vector_search:
-            vector_instructions = f"""
+    if vector_search:
+        vector_instructions = f"""
 This database has vector embeddings. Use the vector index 'article_content_index' with syntax:
 CALL db.index.vector.queryNodes('article_content_index', {top_k}, $embedding) YIELD node, score
 
 The $embedding parameter will be supplied separately when executing the query.
 """
-            return base_prompt + vector_instructions
-        
-        return base_prompt
+        return base_prompt + vector_instructions
+    
+    return base_prompt
     
     def _call_llm_api(self, prompt: str) -> str:
         """
