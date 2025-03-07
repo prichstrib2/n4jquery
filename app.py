@@ -5,6 +5,16 @@ from neo4j import GraphDatabase
 import requests
 import json
 from typing import Dict, List, Any, Tuple, Optional
+from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+from datetime import datetime, timedelta
+import logging
+import re
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 class Neo4jConnection:
     def __init__(self, uri, user, password, database=None):
@@ -506,18 +516,18 @@ IMPORTANT NOTES:
         return where_clause
     
     def _create_prompt(self, query_text: str, vector_search: bool, top_k: int) -> str:
-    """
-    Create a prompt for the LLM to generate a Cypher query with clearer relationship instructions.
-    
-    Args:
-        query_text: Natural language query text
-        vector_search: Whether to use vector search
-        top_k: Number of top results to return for vector search
+        """
+        Create a prompt for the LLM to generate a Cypher query with clearer relationship instructions.
         
-    Returns:
-        Prompt for the LLM
-    """
-    base_prompt = f"""You are an expert in converting natural language queries into Neo4j Cypher queries.
+        Args:
+            query_text: Natural language query text
+            vector_search: Whether to use vector search
+            top_k: Number of top results to return for vector search
+            
+        Returns:
+            Prompt for the LLM
+        """
+        base_prompt = f"""You are an expert in converting natural language queries into Neo4j Cypher queries.
 Your task is to generate a valid Cypher query for Neo4j based on the user's question and the provided database schema.
 
 {self.schema_description}
@@ -551,16 +561,16 @@ IMPORTANT RULES:
 8. If finding articles, include their content using node.content AS article
 9. Never create a query where a Person node has a :WROTE relationship - only Author nodes can write articles"""
 
-    if vector_search:
-        vector_instructions = f"""
+        if vector_search:
+            vector_instructions = f"""
 This database has vector embeddings. Use the vector index 'article_content_index' with syntax:
 CALL db.index.vector.queryNodes('article_content_index', {top_k}, $embedding) YIELD node, score
 
 The $embedding parameter will be supplied separately when executing the query.
 """
-        return base_prompt + vector_instructions
-    
-    return base_prompt
+            return base_prompt + vector_instructions
+        
+        return base_prompt
     
     def _call_llm_api(self, prompt: str) -> str:
         """
@@ -756,6 +766,8 @@ class NLQueryInterface:
         elif any(word in text_lower for word in ["topic", "about", "subject"]):
             return f"""
             MATCH (art:Article)-[:HAS_TOPIC]->(t:Topic)
+            {content
+        MATCH (art:Article)-[:HAS_TOPIC]->(t:Topic)
             {content_filter}
             RETURN art.content AS article, collect(DISTINCT t.name) AS topics
             LIMIT {top_k}
@@ -880,6 +892,57 @@ class VectorSearchInterface:
         self.neo4j.close()
 
 
+def extract_persons_from_text(text):
+    """
+    Extract potential person names from article text.
+    This is a simple implementation that could be enhanced with NLP libraries.
+    
+    Args:
+        text: The article text to analyze
+        
+    Returns:
+        List of potential person names
+    """
+    import re
+    
+    # List of potential persons
+    persons = []
+    
+    # Look for quoted text that might contain person names
+    quotes = re.findall(r'"([^"]*)"', text)
+    for quote in quotes:
+        # Look for something like "said Person Name" pattern
+        said_matches = re.findall(r'said\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', quote)
+        if said_matches:
+            persons.extend(said_matches)
+            
+    # Simple pattern matching for common name formats
+    # First, split text into sentences
+    sentences = re.split(r'[.!?]+', text)
+    
+    for sentence in sentences:
+        # Look for patterns like "FirstName LastName, Title"
+        name_matches = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?:,\s+[a-z]+)', sentence)
+        if name_matches:
+            persons.extend(name_matches)
+            
+        # Look for titles followed by names
+        title_matches = re.findall(r'(Mr\.|Mrs\.|Ms\.|Dr\.)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', sentence)
+        for match in title_matches:
+            persons.append(match[1])  # Append only the name part
+    
+    # Clean up and deduplicate
+    clean_persons = []
+    for person in persons:
+        # Remove trailing punctuation or whitespace
+        clean_name = person.strip('. ,;:')
+        if clean_name and len(clean_name.split()) >= 2:  # Ensure at least first and last name
+            clean_persons.append(clean_name)
+    
+    # Return unique names only
+    return list(set(clean_persons))
+
+
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -889,6 +952,7 @@ initialization_status = {
     "db_initialized": False,
     "error": None
 }
+
 
 @app.before_first_request
 def initialize_interface():
@@ -927,6 +991,7 @@ def initialize_interface():
         error_msg = f"Error initializing query interface: {e}"
         print(f"❌ {error_msg}")
         initialization_status["error"] = error_msg
+
 
 @app.route('/', methods=['GET'])
 def serve_ui():
@@ -1062,6 +1127,265 @@ def query_endpoint():
             "vector_search": vector_search
         }), 500
 
+
+@app.route('/update', methods=['POST'])
+def update_from_url():
+    """
+    Endpoint to update the Neo4j database from a URL.
+    
+    Workflow:
+    1. Receive a URL from the user
+    2. Call the external API to process the URL
+    3. Wait for the processing to complete
+    4. Fetch the resulting JSON from Azure Blob Storage
+    5. Process the JSON and update the Neo4j database
+    6. Return success/failure message
+    
+    Request body:
+    - url (required): The URL to process
+    - wait_time (optional): Time to wait for processing in seconds (default: 5)
+    - max_attempts (optional): Maximum number of attempts to check for the JSON (default: 12)
+    
+    Returns:
+        JSON response with results of the operation
+    """
+    global interface, initialization_status
+    
+    # Check if database is initialized
+    if not initialization_status["db_initialized"]:
+        return jsonify({
+            "error": "Database connection not initialized",
+            "status": initialization_status
+        }), 503  # Service Unavailable
+    
+    # Get URL from request
+    try:
+        data = request.get_json() or {}
+        url = data.get('url', '')
+        wait_time = int(data.get('wait_time', 5))  # Wait time between checks in seconds
+        max_attempts = int(data.get('max_attempts', 12))  # Maximum number of attempts (60 seconds by default)
+        
+        # Validate URL
+        if not url:
+            return jsonify({
+                "error": "Missing required parameter: url"
+            }), 400
+        
+        # Validate wait_time and max_attempts
+        wait_time = max(1, min(wait_time, 30))  # Between 1 and 30 seconds
+        max_attempts = max(1, min(max_attempts, 60))  # Between 1 and 60 attempts
+        
+        logging.info(f"Processing URL: {url}")
+    except Exception as e:
+        return jsonify({
+            "error": f"Invalid request parameters: {str(e)}"
+        }), 400
+    
+    # Step 1: Call the external API
+    try:
+        external_api_url = f"https://agate-web.yellowflower-cf7d678f.eastus.azurecontainerapps.io/locations?url={url}"
+        response = requests.get(external_api_url)
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": f"External API call failed with status code: {response.status_code}",
+                "message": response.text
+            }), 500
+        
+        logging.info("External API call successful, waiting for JSON to be generated...")
+    except Exception as e:
+        return jsonify({
+            "error": f"Error calling external API: {str(e)}"
+        }), 500
+    
+    # Step 2: Wait for processing and then get the JSON from Azure Blob Storage
+    try:
+        # Set up Azure Blob Storage client
+        connection_string = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        if not connection_string:
+            return jsonify({
+                "error": "Azure Storage connection string not configured"
+            }), 500
+        
+        container_name = "agate"
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Wait and check for the JSON file
+        json_data = None
+        attempts = 0
+        latest_modified_time = None
+        latest_blob_name = None
+        
+        while attempts < max_attempts:
+            # Wait before checking
+            time.sleep(wait_time)
+            attempts += 1
+            
+            logging.info(f"Checking for new JSON files (attempt {attempts}/{max_attempts})...")
+            
+            # List all blobs and find the most recent one
+            blobs = list(container_client.list_blobs())
+            
+            if not blobs:
+                logging.info("No blobs found in container")
+                continue
+            
+            # Find the most recently modified blob
+            for blob in blobs:
+                # Parse the last modified time
+                if latest_modified_time is None or blob.last_modified > latest_modified_time:
+                    latest_modified_time = blob.last_modified
+                    latest_blob_name = blob.name
+            
+            # Check if we found a blob and it's recent (within the last 2 minutes)
+            if latest_blob_name and latest_modified_time:
+                now = datetime.utcnow().replace(tzinfo=latest_modified_time.tzinfo)
+                if now - latest_modified_time < timedelta(minutes=2):
+                    # Download the blob content
+                    blob_client = container_client.get_blob_client(latest_blob_name)
+                    blob_data = blob_client.download_blob().readall()
+                    
+                    try:
+                        json_data = json.loads(blob_data)
+                        logging.info(f"Successfully retrieved JSON from blob: {latest_blob_name}")
+                        break
+                    except json.JSONDecodeError:
+                        logging.error(f"Invalid JSON format in blob: {latest_blob_name}")
+                        continue
+            
+            logging.info(f"No recent JSON files found. Waiting for attempt {attempts+1}...")
+        
+        if not json_data:
+            return jsonify({
+                "error": "Failed to retrieve JSON after maximum attempts",
+                "url": url
+            }), 500
+    except Exception as e:
+        return jsonify({
+            "error": f"Error retrieving JSON from Azure Blob Storage: {str(e)}"
+        }), 500
+    
+    # Step 3: Process the JSON and update Neo4j
+    try:
+        # Extract relevant data from the JSON
+        story_type = json_data.get("story_type", {})
+        headline = json_data.get("headline", "")
+        text = json_data.get("text", "")
+        url = json_data.get("url", "")
+        locations = json_data.get("locations", [])
+        
+        # Extract person names from the article text
+        person_names = extract_persons_from_text(text)
+        
+        # Create Cypher query to add article if it doesn't exist
+        article_query = """
+        MERGE (a:Article {name: $url})
+        ON CREATE SET a.content = $text
+        RETURN a
+        """
+        
+        # Execute query to add article
+        article_params = {
+            "url": url,
+            "text": text
+        }
+        
+        article_result = interface.neo4j.run_query(article_query, article_params)
+        
+        if not article_result:
+            return jsonify({
+                "error": "Failed to create article in Neo4j",
+                "url": url
+            }), 500
+        
+        # Add topics based on story_type
+        if story_type.get("category"):
+            topic_query = """
+            MATCH (a:Article {name: $url})
+            MERGE (t:Topic {name: $topic})
+            MERGE (a)-[:HAS_TOPIC]->(t)
+            """
+            
+            topic_params = {
+                "url": url,
+                "topic": story_type.get("category")
+            }
+            
+            interface.neo4j.run_query(topic_query, topic_params)
+        
+        # Extract entities and persons from locations
+        for location in locations:
+            location_name = location.get("location", "")
+            location_type = location.get("type", "")
+            
+            if not location_name:
+                continue
+                
+            # Add as Entity
+            entity_query = """
+            MATCH (a:Article {name: $url})
+            MERGE (e:Entity {name: $entity_name})
+            MERGE (a)-[:MENTIONS_ENTITY]->(e)
+            """
+            
+            entity_params = {
+                "url": url,
+                "entity_name": location_name
+            }
+            
+            interface.neo4j.run_query(entity_query, entity_params)
+            
+        # Add extracted persons to the database
+        for person_name in person_names:
+            person_query = """
+            MATCH (a:Article {name: $url})
+            MERGE (p:Person {name: $person_name})
+            MERGE (a)-[:MENTIONS_PERSON]->(p)
+            """
+            
+            person_params = {
+                "url": url,
+                "person_name": person_name
+            }
+            
+            interface.neo4j.run_query(person_query, person_params)
+        
+        # Optional: Generate and store embedding for the article text
+        try:
+            if interface.embedding_generator:
+                embedding = interface.embedding_generator.generate_embedding(text)
+                if embedding:
+                    embedding_query = """
+                    MATCH (a:Article {name: $url})
+                    SET a.embedding = $embedding
+                    """
+                    
+                    embedding_params = {
+                        "url": url,
+                        "embedding": embedding
+                    }
+                    
+                    interface.neo4j.run_query(embedding_query, embedding_params)
+        except Exception as e:
+            # Don't fail if embedding generation fails
+            logging.error(f"Error generating embedding: {str(e)}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Successfully updated Neo4j database",
+            "url": url,
+            "headline": headline
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"Error updating Neo4j database: {str(e)}",
+            "url": url
+        }), 500
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint with initialization status."""
@@ -1080,6 +1404,7 @@ def health_check():
         "details": initialization_status
     })
 
+
 @app.route('/api', methods=['GET'])
 def api_info():
     """API info endpoint showing app is running."""
@@ -1089,19 +1414,22 @@ def api_info():
         "version": "1.0",
         "endpoints": {
             "/query": "Main query endpoint (GET/POST)",
-            "/health": "Health check endpoint"
+            "/health": "Health check endpoint",
+            "/update": "Update Neo4j from URL endpoint (POST)"
         }
     })
-    
+
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "Endpoint not found"}), 404
 
+
 @app.errorhandler(500)
 def server_error(e):
     return jsonify({"error": "Internal server error"}), 500
+
 
 if __name__ == "__main__":
     # For local development
