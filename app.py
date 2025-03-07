@@ -766,7 +766,7 @@ class NLQueryInterface:
         elif any(word in text_lower for word in ["topic", "about", "subject"]):
             return f"""
             MATCH (art:Article)-[:HAS_TOPIC]->(t:Topic)
-            {content
+            {content}
         MATCH (art:Article)-[:HAS_TOPIC]->(t:Topic)
             {content_filter}
             RETURN art.content AS article, collect(DISTINCT t.name) AS topics
